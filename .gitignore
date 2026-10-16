@@ -1,0 +1,18 @@
+# 敏感信息，禁止提交
+auth.json
+mcp-auth.json
+
+# 运行时状态 / 会话数据（不同步）
+sessions/
+run-history.jsonl
+run-history.jsonl.bak
+
+# OS / 编辑器
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+*~
+.idea/
+.vscode/

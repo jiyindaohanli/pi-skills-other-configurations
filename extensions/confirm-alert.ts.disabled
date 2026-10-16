@@ -1,0 +1,124 @@
+/**
+ * Confirm Alert Extension — 确认提醒扩展
+ *
+ * 当 pi 真正弹出阻塞式 UI 对话框（确认 / 选择 / 输入 / 自定义组件，如工具审批）时：
+ *   1. 响铃 \x07 —— Windows Terminal 标签页闪烁提示，声音可通过设置 bellStyle 启用
+ *   2. Windows 弹窗通知（Toast）
+ *   3. 修改终端标签页标题为「⏸ 需要确认」
+ * 当对话框关闭（用户已确认/取消）后恢复原标题。
+ *
+ * 使用 pi 原生的 ui_prompt_start / ui_prompt_end 事件精确判断，
+ * 不再用「tool_call 后 700ms 未执行」的启发式猜测，避免误报。
+ *
+ * 可用环境变量：
+ *   PI_ALERT_BELL=1/0    开关响铃（默认 1）
+ *   PI_ALERT_TOAST=1/0   开关 Windows 弹窗（默认 1）
+ *   PI_ALERT_TITLE=1/0   开关标题修改（默认 1）
+ */
+
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+
+function envOn(name: string): boolean {
+	return process.env[name] !== "0";
+}
+
+function baseTitle(): string {
+	const cwd = process.cwd().split(/[\\/]/).pop() ?? "";
+	return `π - ${cwd}`;
+}
+
+// —— Windows Toast ——（来自官方 notify.ts 示例的做法）
+function windowsToastScript(title: string, body: string): string {
+	const type = "Windows.UI.Notifications";
+	const mgr = `[${type}.ToastNotificationManager, ${type}, ContentType = WindowsRuntime]`;
+	const template = `[${type}.ToastTemplateType]::ToastText01`;
+	const toast = `[${type}.ToastNotification]::new($xml)`;
+	return [
+		`${mgr} > $null`,
+		`$xml = [${type}.ToastNotificationManager]::GetTemplateContent(${template})`,
+		`$xml.GetElementsByTagName('text')[0].AppendChild($xml.CreateTextNode('${title}: ${body}')) > $null`,
+		`[${type}.ToastNotificationManager]::CreateToastNotifier('Pi').Show(${toast})`,
+	].join("; ");
+}
+
+function notifyWindows(title: string, body: string): void {
+	try {
+		// 延迟加载,避免顶层 require
+		const { execFile } = require("child_process") as typeof import("child_process");
+		execFile("powershell.exe", ["-NoProfile", "-Command", windowsToastScript(title, body)], () => {});
+	} catch {
+		// 静默失败,提醒属于尽力而为
+	}
+}
+
+/** 阻塞式 UI 对话框的可读名称 */
+const kindLabel: Record<string, string> = {
+	select: "选择",
+	confirm: "确认",
+	input: "输入",
+	editor: "编辑器",
+	custom: "对话框",
+};
+
+export default function (pi: ExtensionAPI) {
+	let waiting = false;
+	let lastToastAt = 0;
+
+	function clearAlert(ctx: ExtensionContext) {
+		if (!waiting) return;
+		waiting = false;
+		if (envOn("PI_ALERT_TITLE") && ctx.mode === "tui") {
+			ctx.ui.setTitle(baseTitle());
+		}
+	}
+
+	function alert(ctx: ExtensionContext, kind: string, title?: string) {
+		if (waiting) return;
+		waiting = true;
+
+		const label = kindLabel[kind] ?? "对话框";
+		const detail = title ? `: ${title}` : "";
+
+		if (envOn("PI_ALERT_BELL")) {
+			// 响铃:窗口未聚焦时 Windows Terminal 会让标签页闪烁并响起提示音
+			process.stdout.write("\x07");
+		}
+
+		if (envOn("PI_ALERT_TITLE") && ctx.mode === "tui") {
+			ctx.ui.setTitle(`⏸ 需要确认: ${label}`);
+		}
+
+		if (envOn("PI_ALERT_TOAST")) {
+			const now = Date.now();
+			if (now - lastToastAt > 10_000) {
+				lastToastAt = now;
+				notifyWindows("Pi", `需要${label}${detail},请回到终端`);
+			}
+		}
+	}
+
+	// pi 真正弹出阻塞式 UI 对话框(工具审批/确认/选择/输入)时触发
+	pi.on("ui_prompt_start", async (event, ctx) => {
+		if (!ctx.hasUI) return;
+		alert(ctx, event.kind, event.title);
+	});
+
+	// 对话框关闭 —— 用户已做出决定,恢复标题
+	pi.on("ui_prompt_end", async (_event, ctx) => {
+		clearAlert(ctx);
+	});
+
+	// 全部执行完毕,回到空闲等待输入状态
+	pi.on("agent_settled", async (_event, ctx) => {
+		clearAlert(ctx);
+		if (ctx.mode === "tui") {
+			ctx.ui.setTitle(`π ✅ - 等待输入`);
+			// 1.5 秒后恢复普通标题,避免残留状态感
+			setTimeout(() => ctx.ui.setTitle(baseTitle()), 1500);
+		}
+	});
+
+	pi.on("session_shutdown", async (_event, ctx) => {
+		clearAlert(ctx);
+	});
+}

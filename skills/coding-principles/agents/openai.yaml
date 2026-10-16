@@ -1,0 +1,6 @@
+interface:
+  display_name: "编码四原则"
+  short_description: "强制执行编码前思考、简洁优先、精准修改、目标驱动执行四原则"
+  default_prompt: "使用 -principles 确保所有修改符合编码四原则。"
+policy:
+  allow_implicit_invocation: true
